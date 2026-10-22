@@ -1,0 +1,36 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    @apply font-body;
+  }
+  h1, h2, h3, h4 {
+    @apply font-display;
+  }
+  body {
+    @apply text-ink-900 dark:text-ink-50 antialiased;
+  }
+  ::selection {
+    @apply bg-accent-500/30;
+  }
+  :focus-visible {
+    @apply outline-none ring-2 ring-accent-500 ring-offset-2 ring-offset-white dark:ring-offset-surface-dark;
+  }
+}
+
+@layer utilities {
+  .transition-theme {
+    @apply transition-colors duration-200;
+  }
+}
+
+/* Respecte les preferences systeme de reduction de mouvement (accessibilite) */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

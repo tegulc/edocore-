@@ -1,0 +1,28 @@
+name: educore_mobile
+description: >
+  Application mobile EDUCORE - consultation des notes/bulletins, paiement
+  mobile, presence (QR code), chat, notifications push (Module 29).
+  Squelette Phase 9 : authentification + tableau de bord + bulletin.
+  Un seul code source Android/iOS (Volume 3, Partie 5).
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.1                      # client HTTP vers l'API EDUCORE
+  flutter_secure_storage: ^9.2.2    # stockage chiffre des jetons JWT (jamais SharedPreferences en clair)
+  provider: ^6.1.2                  # gestion d'etat simple, coherente avec un squelette Phase 9
+  intl: ^0.19.0                     # formatage dates/nombres FR
+  qr_flutter: ^4.1.0                # affichage du QR code eleve (pointage de presence)
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

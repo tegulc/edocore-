@@ -1,0 +1,55 @@
+spring:
+  application:
+    name: educore-notifications-service
+
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+    default-property-inclusion: non_null
+
+  datasource:
+    # Partage volontairement la meme base que le backend principal (etape
+    # intermediaire raisonnable avant une separation complete des donnees -
+    # voir README, section "Limites assumees de cette separation").
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/educore}
+    username: ${DATABASE_USER:educore}
+    password: ${DATABASE_PASSWORD:educore}
+
+  jpa:
+    hibernate:
+      ddl-auto: validate # le schema (conversations, messages, notifications...) est deja cree par V1 du backend principal
+    open-in-view: false
+  # Pas de Flyway ici : ce service ne possede pas son propre schema, il consomme
+  # des tables deja creees et versionnees par educore-backend (source de verite unique).
+  flyway:
+    enabled: false
+
+server:
+  port: 8081
+
+educore:
+  # Meme secret que educore-backend : ce service valide localement les JWT
+  # emis par /auth/login (verification de signature/expiration/claims), sans
+  # jamais rappeler le backend principal pour chaque requete (coherent avec
+  # le caractere stateless du JWT, voir document d'architecture Phase 0).
+  security:
+    jwt:
+      secret: ${JWT_SECRET:changez-ce-secret-en-production-256-bits-minimum}
+    # Cle partagee pour les appels service-a-service SANS contexte utilisateur
+    # (ex: educore-backend notifie "bulletin publie" -> cree une notification),
+    # distincte de l'authentification JWT des utilisateurs finaux.
+    service-key: ${NOTIFICATIONS_SERVICE_KEY:changez-cette-cle-en-production}
+  integrations:
+    sms:
+      provider-api-key: ${SMS_PROVIDER_API_KEY:}
+    email:
+      provider-api-key: ${EMAIL_PROVIDER_API_KEY:}
+    push:
+      firebase-server-key: ${FIREBASE_SERVER_KEY:}
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+logging:
+  level:
+    com.educore.notifications: ${LOG_LEVEL:DEBUG}

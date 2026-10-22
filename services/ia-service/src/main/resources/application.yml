@@ -1,0 +1,35 @@
+spring:
+  application:
+    name: educore-ia-service
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+    default-property-inclusion: non_null
+  datasource:
+    # Meme choix intermediaire que notifications-service : base partagee avec
+    # educore-backend, qui reste l'unique proprietaire du schema (voir README).
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/educore}
+    username: ${DATABASE_USER:educore}
+    password: ${DATABASE_PASSWORD:educore}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: false
+
+server:
+  port: 8082
+
+educore:
+  security:
+    jwt:
+      secret: ${JWT_SECRET:changez-ce-secret-en-production-256-bits-minimum}
+    service-key: ${IA_SERVICE_KEY:changez-cette-cle-en-production}
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+logging:
+  level:
+    com.educore.ia: ${LOG_LEVEL:DEBUG}

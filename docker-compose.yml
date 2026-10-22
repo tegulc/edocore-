@@ -1,0 +1,141 @@
+# ==============================================================================
+# EDUCORE / SIGES - Stack de developpement local (Phase 0)
+# Usage : docker compose up -d
+# Build sequentiel (connexion instable) : .\scripts\docker-build.ps1
+# Dev local sans Docker Java : .\scripts\dev-local.ps1
+# ==============================================================================
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: educore-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: educore
+      POSTGRES_USER: educore
+      POSTGRES_PASSWORD: educore
+    ports:
+      - "5432:5432"
+    volumes:
+      - educore_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U educore"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: educore-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - educore_redis_data:/data
+
+  minio:
+    image: minio/minio:latest
+    container_name: educore-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: educore
+      MINIO_ROOT_PASSWORD: educore123
+    ports:
+      - "9000:9000"  # API S3
+      - "9001:9001"  # Console web
+    volumes:
+      - educore_minio_data:/data
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: educore-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      DATABASE_URL: jdbc:postgresql://postgres:5432/educore
+      DATABASE_USER: educore
+      DATABASE_PASSWORD: educore
+      REDIS_URL: redis://redis:6379
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: educore
+      S3_SECRET_KEY: educore123
+      JWT_SECRET: changez-ce-secret-en-production-256-bits-minimum
+      JWT_EXPIRATION_SECONDS: 900
+      JWT_REFRESH_EXPIRATION_SECONDS: 604800
+    ports:
+      - "8080:8080"
+
+  # Service independant Chat + Notifications (Volume 2 §2.5, Volume 3) - separe
+  # du backend principal des la V1, partage la meme base Postgres (voir README
+  # du service pour les limites assumees de ce choix intermediaire).
+  notifications:
+    build:
+      context: ./services/notifications-service
+      dockerfile: Dockerfile
+    container_name: educore-notifications
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_started # attend que le schema (migrations Flyway) soit applique
+    environment:
+      DATABASE_URL: jdbc:postgresql://postgres:5432/educore
+      DATABASE_USER: educore
+      DATABASE_PASSWORD: educore
+      JWT_SECRET: changez-ce-secret-en-production-256-bits-minimum
+      NOTIFICATIONS_SERVICE_KEY: changez-cette-cle-en-production
+    ports:
+      - "8081:8081"
+
+  # Service independant Intelligence Artificielle (Module 25, Volume 2 §2.5) -
+  # meme principe que "notifications" (Phase 7) : port dedie, base partagee.
+  ia:
+    build:
+      context: ./services/ia-service
+      dockerfile: Dockerfile
+    container_name: educore-ia
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    environment:
+      DATABASE_URL: jdbc:postgresql://postgres:5432/educore
+      DATABASE_USER: educore
+      DATABASE_PASSWORD: educore
+      JWT_SECRET: changez-ce-secret-en-production-256-bits-minimum
+      IA_SERVICE_KEY: changez-cette-cle-en-production
+    ports:
+      - "8082:8082"
+
+  frontend:
+    image: node:20-alpine
+    container_name: educore-frontend
+    working_dir: /app
+    environment:
+      VITE_BACKEND_URL: http://backend:8080
+      VITE_NOTIFICATIONS_URL: http://notifications:8081
+    volumes:
+      - ./frontend:/app
+    command: sh -c "npm install && npm run dev -- --host"
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+      - notifications
+      - ia
+
+volumes:
+  educore_postgres_data:
+  educore_redis_data:
+  educore_minio_data:

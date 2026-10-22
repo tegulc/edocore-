@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notifications
+  namespace: educore
+spec:
+  replicas: 2 # les connexions WebSocket longue duree beneficient d'etre isolees du backend principal - voir README
+  selector:
+    matchLabels: { app: notifications }
+  template:
+    metadata:
+      labels: { app: notifications }
+    spec:
+      containers:
+        - name: notifications
+          image: educore/notifications-service:latest
+          ports: [{ containerPort: 8081 }]
+          envFrom:
+            - configMapRef: { name: educore-config }
+            - secretRef: { name: educore-secrets }
+          readinessProbe:
+            httpGet: { path: /actuator/health, port: 8081 }
+            initialDelaySeconds: 20
+          resources:
+            requests: { cpu: "300m", memory: "384Mi" }
+            limits: { cpu: "1", memory: "1Gi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notifications
+  namespace: educore
+spec:
+  selector: { app: notifications }
+  ports: [{ port: 8081, targetPort: 8081 }]
+  sessionAffinity: ClientIP # utile pour les connexions WebSocket (evite de rebasculer un client entre pods)

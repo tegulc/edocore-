@@ -1,0 +1,13 @@
+-- Ajout des champs pour le workflow conseil de classe dans la table bulletins
+ALTER TABLE bulletins 
+ADD COLUMN IF NOT EXISTS date_conseil DATE,
+ADD COLUMN IF NOT EXISTS recompenses TEXT,
+ADD COLUMN IF NOT EXISTS avertissement_travail BOOLEAN DEFAULT FALSE,
+ADD COLUMN IF NOT EXISTS avertissement_conduite BOOLEAN DEFAULT FALSE,
+ADD COLUMN IF NOT EXISTS blame BOOLEAN DEFAULT FALSE,
+ADD COLUMN IF NOT EXISTS exclusion BOOLEAN DEFAULT FALSE,
+ADD COLUMN IF NOT EXISTS observation_conseil TEXT,
+ADD COLUMN IF NOT EXISTS decision_finale VARCHAR(50),
+ADD COLUMN IF NOT EXISTS classe_orientation VARCHAR(100),
+ADD COLUMN IF NOT EXISTS valide_par_id BIGINT,
+ADD COLUMN IF NOT EXISTS date_validation TIMESTAMP;

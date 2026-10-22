@@ -1,0 +1,15 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:educore_test;MODE=PostgreSQL
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+  flyway:
+    enabled: false
+educore:
+  security:
+    jwt:
+      secret: secret-de-test-uniquement-ne-pas-utiliser-en-production
+      access-expiration-ms: 900000
+      refresh-expiration-ms: 604800000

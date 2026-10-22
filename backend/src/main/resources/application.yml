@@ -1,0 +1,100 @@
+spring:
+  application:
+    name: educore-backend
+
+  # Conforme Volume 6 (Documentation API), Partie I.3 : tous les echanges JSON
+  # utilisent la convention snake_case (mot_de_passe, jeton_rafraichissement...).
+  # Le code Java reste en camelCase idiomatique ; Jackson fait la conversion au vol.
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+    default-property-inclusion: non_null
+
+  datasource:
+    # Conforme Volume 7 (Guide d'installation), Partie III.1 : DATABASE_URL est
+    # la variable d'environnement principale (chaine de connexion complete).
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/educore}
+    username: ${DATABASE_USER:educore}
+    password: ${DATABASE_PASSWORD:educore}
+    hikari:
+      maximum-pool-size: 20
+
+  jpa:
+    hibernate:
+      ddl-auto: validate # le schema est gere par Flyway, jamais par Hibernate en prod
+    open-in-view: false  # anti-pattern classique evite : pas de requetes JPA depuis la vue
+    properties:
+      hibernate:
+        format_sql: true
+        default_schema: public
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  data:
+    redis:
+      # REDIS_URL conforme Volume 7 : format redis://[user:password@]host:port
+      url: ${REDIS_URL:redis://localhost:6379}
+
+server:
+  port: 8080
+  compression:
+    enabled: true
+
+educore:
+  security:
+    jwt:
+      secret: ${JWT_SECRET:changez-ce-secret-en-production-256-bits-minimum}
+      # JWT_EXPIRATION_SECONDS conforme Volume 7 (defaut documente : 900s = 15 min)
+      access-expiration-seconds: ${JWT_EXPIRATION_SECONDS:900}
+      # Non liste explicitement au Volume 7 (qui ne pretend pas a l'exhaustivite) :
+      # extension necessaire pour distinguer la duree de vie du refresh token.
+      refresh-expiration-seconds: ${JWT_REFRESH_EXPIRATION_SECONDS:604800} # 7 jours
+      deux-fa-pending-expiration-seconds: 120 # jeton transitoire le temps de saisir le code 2FA
+    mot-de-passe:
+      duree-validite-jours: ${PASSWORD_EXPIRATION_DAYS:90}
+  stockage:
+    # S3_ENDPOINT / S3_BUCKET conformes Volume 7 (nom generique : MinIO est compatible S3)
+    s3:
+      endpoint: ${S3_ENDPOINT:http://localhost:9000}
+      access-key: ${S3_ACCESS_KEY:educore}
+      secret-key: ${S3_SECRET_KEY:educore123}
+      bucket: ${S3_BUCKET:educore-documents}
+  # Reserves pour les phases ulterieures (Volume 7 III.1), documentes des maintenant
+  # pour que la configuration n'ait pas a etre redecouverte module par module.
+  integrations:
+    orange-money:
+      api-key: ${ORANGE_MONEY_API_KEY:}
+      webhook-secret: ${ORANGE_MONEY_WEBHOOK_SECRET:}
+    mtn-momo:
+      api-key: ${MTN_MOMO_API_KEY:}
+      webhook-secret: ${MTN_MOMO_WEBHOOK_SECRET:}
+  # Service independant Chat + Notifications (Phase 7, Volume 2 §2.5) - appel
+  # HTTP service-a-service, authentifie par cle partagee (pas de JWT utilisateur
+  # disponible pour ces appels declenches par le systeme, ex: "bulletin publie").
+  notifications-service:
+    url: ${NOTIFICATIONS_SERVICE_URL:http://localhost:8081}
+    service-key: ${NOTIFICATIONS_SERVICE_KEY:changez-cette-cle-en-production}
+    sms:
+      provider-api-key: ${SMS_PROVIDER_API_KEY:}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+  api-docs:
+    path: /v3/api-docs
+
+logging:
+  level:
+    com.educore: ${LOG_LEVEL:DEBUG}
+    org.springframework.security: INFO

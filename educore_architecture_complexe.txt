@@ -1,0 +1,802 @@
+================================================================================
+EDUCORE / SIGES — SYSTEME ERP INTELLIGENT DE GESTION D'ETABLISSEMENTS SCOLAIRES
+DOCUMENT D'ARCHITECTURE TECHNIQUE COMPLEXE
+Volume 3 : Architecture logicielle, donnees, securite, deploiement
+Version : 1.0 — Phase 0
+================================================================================
+
+TABLE DES MATIERES
+-------------------
+1. Vision architecturale et principes directeurs
+2. Style architectural global
+3. Architecture logicielle (backend)
+4. Architecture frontend web
+5. Architecture mobile (Flutter)
+6. Architecture des donnees
+7. Architecture multi-tenant
+8. Architecture securite
+9. Architecture reseau et deploiement
+10. Architecture API
+11. Architecture temps reel
+12. Architecture Intelligence Artificielle
+13. Architecture de resilience et de scalabilite
+14. Observabilite et monitoring
+15. Strategie de tests
+16. Matrice de dependances des modules
+17. Schemas de flux (diagrammes texte)
+18. Glossaire technique
+19. Annexes : justification des choix technologiques
+
+
+================================================================================
+1. VISION ARCHITECTURALE ET PRINCIPES DIRECTEURS
+================================================================================
+
+EDUCORE est concu comme une plateforme SaaS multi-tenant, et non comme un
+logiciel installe par etablissement. Une seule instance applicative sert des
+centaines d'etablissements, chacun voyant une plateforme qui lui est propre.
+
+Principes directeurs (s'appliquent a chaque module, sans exception) :
+
+  P1. Isolation des donnees stricte (multi-tenant "silo logique")
+      Aucune requete ne doit pouvoir, meme par erreur de developpement,
+      lire ou ecrire les donnees d'un autre etablissement.
+
+  P2. Modularite activable
+      Chaque module (paiement, transport, cantine, IA...) doit pouvoir etre
+      active/desactive par etablissement sans redeploiement.
+
+  P3. API-first
+      Le backend n'expose que des API REST/WebSocket versionnees. Le frontend
+      web, l'application mobile et les integrations tierces consomment tous
+      la meme API, sans acces direct a la base de donnees.
+
+  P4. Degradation gracieuse en connexion limitee
+      Le mobile et le web doivent rester utilisables (lecture seule, file
+      d'attente de synchronisation) en cas de reseau instable — realite
+      des etablissements vises.
+
+  P5. Auditabilite totale
+      Toute action sensible (note modifiee, paiement enregistre, dossier
+      eleve consulte) est tracee dans un journal d'audit immuable.
+
+  P6. Internationalisation native (FR/EN)
+      Aucune chaine de caractere metier n'est codee en dur dans la logique ;
+      tout passe par des cles de traduction, y compris les notifications.
+
+  P7. Cycle en V par module
+      Specification -> conception -> developpement -> tests unitaires ->
+      tests d'integration -> recette -> livraison, avant de passer au
+      module suivant.
+
+
+================================================================================
+2. STYLE ARCHITECTURAL GLOBAL
+================================================================================
+
+EDUCORE adopte une architecture dite "MODULITH STRUCTURE" (monolithe modulaire)
+plutot qu'une decomposition en microservices des le depart. Justification :
+
+  - Une equipe reduite ne peut pas operer 20-30 microservices sans surcharge
+    operationnelle (deploiement, observabilite, latence reseau inter-services).
+  - Les modules du cahier des charges sont fortement couples entre eux
+    (Notes <-> Bulletins <-> Discipline <-> Dashboard), ce qui favoriserait
+    des appels reseau constants dans une architecture microservices naive.
+  - Le monolithe modulaire impose des frontieres de package strictes
+    (com.educore.modules.<nom>), ce qui permet une extraction future en
+    microservices independants (ex: module Paiement, module IA) des lors
+    que la charge le justifie, SANS reecriture complete.
+
+Schema logique global :
+
+    +-------------------+       +--------------------+
+    |  Frontend Web      |       |  App Mobile Flutter |
+    |  React + TS        |       |  (Android / iOS)    |
+    +---------+----------+       +----------+-----------+
+              |  HTTPS / REST + WebSocket    |
+              +---------------+--------------+
+                              |
+                    +---------v----------+
+                    |   API Gateway /     |
+                    |   Reverse proxy     |
+                    |   (Nginx)           |
+                    +---------+----------+
+                              |
+                +-------------v--------------+
+                |     BACKEND MONOLITHIQUE     |
+                |     MODULAIRE (Spring Boot)  |
+                |                              |
+                |  modules/auth                |
+                |  modules/etablissement       |
+                |  modules/eleve               |
+                |  modules/parent              |
+                |  modules/enseignant          |
+                |  modules/classe              |
+                |  modules/matiere             |
+                |  modules/emploidutemps       |
+                |  modules/note                |
+                |  modules/bulletin            |
+                |  modules/presence            |
+                |  modules/discipline          |
+                |  modules/paiement            |
+                |  modules/comptabilite        |
+                |  modules/bibliotheque        |
+                |  modules/infirmerie          |
+                |  modules/transport           |
+                |  modules/cantine             |
+                |  modules/personnel           |
+                |  modules/document            |
+                |  modules/chat                |
+                |  modules/reunion             |
+                |  modules/notification        |
+                |  modules/ia                  |
+                |  modules/dashboard           |
+                |  modules/rapport             |
+                +----+--------+-------+--------+
+                     |        |       |
+        +------------+  +-----v---+  +v-------------+
+        |PostgreSQL 16|  | Redis 7 |  | MinIO / S3    |
+        |(multi-tenant)| |(cache,  |  |(documents,    |
+        |             |  |sessions)|  | photos, PDF)  |
+        +-------------+  +---------+  +---------------+
+
+              |
+    +---------v-----------+     +------------------------+
+    | Elasticsearch        |     | APIs externes           |
+    | (recherche, si volume|     | Orange Money / MTN MoMo |
+    |  important)          |     | Banques / Moodle /      |
+    +-----------------------+    | Microsoft 365 / Google  |
+                                 | Workspace                |
+                                 +------------------------+
+
+
+================================================================================
+3. ARCHITECTURE LOGICIELLE (BACKEND)
+================================================================================
+
+3.1 Organisation en couches (MVC etendu)
+-----------------------------------------
+
+Chaque module suit rigoureusement la meme structure en couches, en respectant
+le sens unique de dependance (une couche ne connait que la couche du dessous) :
+
+    Controller  (REST, validation d'entree, codes HTTP)
+        |
+        v
+    Service     (regles metier, transactions, orchestration)
+        |
+        v
+    Repository  (acces donnees, Spring Data JPA)
+        |
+        v
+    Entity      (mapping objet-relationnel, JPA/Hibernate)
+
+    Transversal a toutes les couches : DTO (objets d'echange, jamais
+    l'entite JPA n'est exposee directement au frontend).
+
+3.2 Arborescence de package (convention imposee a tous les modules)
+---------------------------------------------------------------------
+
+    com.educore
+     |-- EducoreApplication.java
+     |-- common/
+     |    |-- base/            (BaseEntity, TenantScoped, BasePagination)
+     |    |-- exception/       (GlobalExceptionHandler, ApiError, BusinessException)
+     |    |-- util/            (formatters, validators partages)
+     |-- config/               (Security, OpenAPI, JPA auditing, CORS, WebSocket)
+     |-- security/              (JWT, OAuth2, TenantContext, RBAC)
+     |-- modules/
+     |    |-- auth/
+     |    |    |-- controller/
+     |    |    |-- service/
+     |    |    |-- repository/
+     |    |    |-- entity/
+     |    |    |-- dto/
+     |    |    |-- mapper/       (MapStruct : Entity <-> DTO)
+     |    |    |-- exception/    (exceptions specifiques au module)
+     |    |-- eleve/
+     |    |    |-- ... (meme structure)
+     |    |-- note/
+     |    |    |-- ...
+     |    +-- [... 1 sous-package par module du cahier des charges]
+
+3.3 Regles de couplage entre modules
+--------------------------------------
+
+  - Un module NE PEUT PAS importer directement le repository ou l'entite
+    d'un autre module. Il ne peut consommer qu'un SERVICE PUBLIC expose
+    (interface documentee), jamais l'implementation interne.
+  - Exemple autorise : modules/bulletin/service/BulletinService appelle
+    modules/note/service/NoteService.calculerMoyenne(...)
+  - Exemple interdit : modules/bulletin ne doit jamais faire
+    "NoteRepository.findBy...()" directement.
+  - Cette regle est ce qui permettra, si necessaire, d'extraire un module
+    en microservice independant sans casser les autres.
+
+3.4 Gestion des transactions
+-------------------------------
+
+  - Toute methode de Service modifiant plusieurs entites est annotee
+    @Transactional, avec une politique de rollback explicite sur
+    BusinessException.
+  - Les workflows de validation (ex: note saisie -> validee par le chef de
+    departement -> publiee) sont modelises comme une machine a etats finie
+    (StatutNote : BROUILLON -> SOUMISE -> VALIDEE -> PUBLIEE -> ARCHIVEE),
+    jamais comme un simple booleen.
+
+3.5 Traitement asynchrone
+----------------------------
+
+  - Les operations non bloquantes pour l'utilisateur (envoi SMS/email/push,
+    generation de PDF de bulletin, calcul de rang de classe) sont executees
+    de maniere asynchrone via @Async + une file Redis (Spring Data Redis
+    Streams ou RabbitMQ si le volume le justifie en Phase 7+).
+  - Objectif : le temps de reponse HTTP percu par l'utilisateur ne doit
+    jamais dependre de la latence d'un fournisseur SMS ou d'un moteur PDF.
+
+
+================================================================================
+4. ARCHITECTURE FRONTEND WEB
+================================================================================
+
+4.1 Organisation
+-------------------
+
+    src/
+     |-- app/            (bootstrap, providers globaux)
+     |-- components/
+     |    |-- layout/     (Navbar, Sidebar, Footer, AppShell)
+     |    |-- ui/         (Card, Bouton, Table, Modal, Badge... design system)
+     |-- pages/           (1 dossier par module fonctionnel)
+     |-- hooks/           (stores Zustand : theme, auth, notifications)
+     |-- lib/             (client API, utilitaires)
+     |-- types/           (types miroir exact des DTO backend)
+     |-- styles/          (design tokens Tailwind)
+
+4.2 Principes
+----------------
+
+  - Un seul point d'acces reseau : lib/api.ts (intercepteur JWT centralise,
+    gestion uniforme des erreurs 401/403).
+  - Etat serveur (donnees venant de l'API) et etat client (theme, UI ouverte/
+    fermee) sont deliberement separes : le premier via une couche de cache
+    de requetes (a introduire en Phase 1 : TanStack Query), le second via
+    Zustand.
+  - Le layout (Navbar/Sidebar/Footer) est un "contrat" fixe : chaque nouveau
+    module ajoute une entree de navigation sans jamais modifier la structure
+    du layout lui-meme.
+  - RBAC cote UI : les elements de navigation et les actions sont filtres
+    selon le role, MAIS l'autorisation reelle est toujours revalidee cote
+    backend (le frontend ne fait jamais confiance a lui-meme).
+
+4.3 Fonctionnement en connexion limitee
+------------------------------------------
+
+  - Mise en cache locale des ecrans consultes recemment (IndexedDB via une
+    couche a ajouter en Phase 9), pour un mode "lecture seule hors-ligne".
+  - File d'attente d'actions (ex: prise de presence) stockee localement et
+    rejouee automatiquement des que la connexion revient.
+
+
+================================================================================
+5. ARCHITECTURE MOBILE (FLUTTER)
+================================================================================
+
+5.1 Choix technique
+------------------------
+
+  Flutter est retenu pour partager un seul code source entre Android et iOS,
+  reduisant le cout de maintenance par rapport a deux applications natives
+  distinctes — critere important pour une equipe reduite visant plusieurs
+  pays.
+
+5.2 Organisation (structure cible, Phase 9)
+-----------------------------------------------
+
+    lib/
+     |-- main.dart
+     |-- core/            (client HTTP, gestion JWT, theme, i18n FR/EN)
+     |-- features/         (1 dossier par module mobile : notes, paiement,
+     |                       presence, chat, notifications)
+     |-- shared/            (widgets communs : cartes, boutons, formulaires)
+
+5.3 Fonctionnalites mobiles prioritaires (Module 29)
+---------------------------------------------------------
+
+  - Consultation notes/bulletins, paiement mobile (Orange Money/MTN MoMo),
+    presence (scan QR Code), chat, notifications push (Firebase Cloud
+    Messaging).
+
+5.4 Mode hors-ligne
+------------------------
+
+  - Base de donnees locale embarquee (SQLite via drift ou isar) pour les
+    donnees consultees recemment.
+  - Synchronisation differentielle au retour de connexion (comparaison de
+    version/horodatage, jamais un ecrasement complet).
+
+
+================================================================================
+6. ARCHITECTURE DES DONNEES
+================================================================================
+
+6.1 Moteur principal : PostgreSQL 16
+-----------------------------------------
+
+  - Choisi pour sa robustesse transactionnelle (ACID), son support natif
+    du JSON (JSONB pour les champs semi-structures comme les preferences
+    utilisateur), et son ecosysteme d'extensions (uuid-ossp, pgcrypto).
+  - Toutes les tables sensibles portent un index sur etablissement_id
+    (isolation + performance des requetes filtrees par tenant).
+
+6.2 Cache : Redis 7
+-----------------------
+
+  Usages distincts (namespaces separes) :
+    - Cache applicatif (resultats de calculs couteux : moyennes de classe,
+      classements) avec invalidation explicite a chaque nouvelle note saisie.
+    - Sessions/refresh tokens revoques (liste noire de jetons).
+    - Files d'attente legeres (notifications, taches asynchrones).
+    - Rate limiting (protection contre les abus d'API).
+
+6.3 Stockage de fichiers : MinIO / AWS S3
+----------------------------------------------
+
+  - Tous les fichiers binaires (photos, actes de naissance, certificats
+    medicaux, bulletins PDF, pieces jointes de chat) sont stockes hors
+    de la base de donnees, seule l'URL/reference etant persistee en base.
+  - Permet un stockage compatible S3 auto-heberge (MinIO) pour les
+    etablissements souhaitant garder leurs donnees en Afrique, ou un
+    bascule vers AWS S3 pour les deploiements cloud.
+
+6.4 Recherche : Elasticsearch (optionnel, active si le volume le justifie)
+-------------------------------------------------------------------------------
+
+  - Reserve aux recherches complexes a grande echelle (recherche plein
+    texte dans les documents, recherche multi-criteres eleves/enseignants
+    sur des bases de plusieurs centaines de milliers d'enregistrements).
+  - Non active en Phase 0-8 : PostgreSQL (avec index GIN/trigram) suffit
+    largement tant que la base ne depasse pas quelques centaines de
+    milliers de lignes par table.
+
+6.5 Gestion des annees scolaires sans perte d'historique
+--------------------------------------------------------------
+
+  - Chaque enregistrement pedagogique (note, presence, inscription) est
+    rattache a une annee_scolaire_id et, si applicable, une periode_id.
+  - Aucune donnee n'est jamais supprimee au changement d'annee : elle est
+    seulement filtree par defaut sur l'annee active, consultable en
+    historique sur demande.
+
+
+================================================================================
+7. ARCHITECTURE MULTI-TENANT
+================================================================================
+
+Strategie retenue : "Shared database, shared schema, discriminant column"
+(base et schema partages, colonne discriminante etablissement_id).
+
+Justification par rapport aux alternatives :
+
+  - Schema par tenant (un schema PostgreSQL par etablissement) : isolation
+    plus forte mais migrations Flyway multipliees par le nombre
+    d'etablissements (des centaines), operationnellement lourd.
+  - Base par tenant : cout d'infrastructure prohibitif pour des
+    etablissements a faible budget (realite africaine visee).
+  - Colonne discriminante + filtre Hibernate global : bon compromis
+    cout/isolation, standard de l'industrie SaaS B2B a ce stade de
+    maturite produit.
+
+Mecanisme technique :
+
+  1. Le JWT contient l'etablissement_id de l'utilisateur connecte.
+  2. Le filtre JwtAuthenticationFilter peuple TenantContext (thread-local)
+     a chaque requete.
+  3. Un @FilterDef Hibernate global, active automatiquement sur toute
+     entite implementant TenantScoped, restreint SILENCIEUSEMENT chaque
+     requete JPA a l'etablissement courant.
+  4. Defense en profondeur : chaque endpoint sensible revalide en plus
+     explicitement l'etablissement_id en base (jamais une confiance
+     aveugle dans le seul filtre Hibernate).
+
+Migration vers un isolement plus fort : si un etablissement (gouvernemental,
+tres grand groupe scolaire) exige une base dediee pour des raisons
+reglementaires, l'architecture permet une extraction ulterieure sans
+reecriture applicative (seul le provisioning change).
+
+
+================================================================================
+8. ARCHITECTURE SECURITE
+================================================================================
+
+8.1 Authentification
+------------------------
+
+  - JWT (access token 15 min, refresh token 7 jours), signature HMAC-SHA256
+    (cle rotative en production, jamais commitee).
+  - OAuth2 pour les connexions via Google Workspace / Microsoft 365
+    (facilite l'adoption dans les etablissements deja equipes).
+  - 2FA (TOTP, RFC 6238) obligatoire pour les roles a privileges eleves
+    (Administrateur, Directeur, Comptable) — configurable par etablissement.
+
+8.2 Autorisation (RBAC fin)
+---------------------------------
+
+  - Roles systeme fixes (15 roles du cahier des charges) + table
+    permissions/role_permissions pour un controle granulaire
+    (ex: NOTES_SAISIR different de NOTES_VALIDER).
+  - Verification a deux niveaux : @PreAuthorize au niveau controller
+    (role macro) + verification metier au niveau service (permission fine
+    + appartenance au tenant +, pour un enseignant, appartenance a la
+    classe/matiere concernee).
+
+8.3 Chiffrement
+-------------------
+
+  - Donnees en transit : HTTPS/TLS 1.3 obligatoire (termine au niveau
+    Nginx/ingress Kubernetes).
+  - Donnees sensibles au repos : chiffrement applicatif AES-256 pour les
+    champs les plus critiques (numeros de securite sociale/CNPS, certains
+    documents medicaux), en plus du chiffrement disque standard
+    PostgreSQL/MinIO.
+  - Mots de passe : BCrypt (facteur de cout 12), jamais de hachage
+    reversible.
+
+8.4 Protections applicatives standard
+-------------------------------------------
+
+  - CSRF : non applicable (API stateless sans cookies de session), mais
+    validation stricte de l'origine (CORS) en complement.
+  - XSS : echappement systematique cote frontend (React echappe par
+    defaut), Content-Security-Policy stricte au niveau Nginx.
+  - Injection SQL : usage exclusif de requetes parametrees via JPA/Hibernate,
+    aucune concatenation de chaines SQL brutes.
+  - Rate limiting : par IP et par utilisateur (Redis), avec seuils
+    plus stricts sur /auth/connexion pour limiter le bourrage d'identifiants.
+
+8.5 Audit et tracabilite
+------------------------------
+
+  - Table historique_connexions : chaque tentative de connexion
+    (succes/echec, IP, user-agent).
+  - Journal d'audit transversal : toute creation/modification/suppression
+    sur une entite sensible (note, paiement, dossier eleve, permission)
+    enregistre qui, quoi, quand, avant/apres.
+  - Journal immuable : ecriture seule (append-only), jamais de mise a jour
+    ni de suppression d'une ligne d'audit existante.
+
+8.6 Sauvegardes et continuite
+------------------------------------
+
+  - Sauvegardes automatiques quotidiennes de PostgreSQL (pg_dump ou
+    WAL archiving pour un point-in-time recovery), retention configurable.
+  - Sauvegarde des objets MinIO/S3 en replication cross-region si deploiement
+    cloud.
+  - Plan de reprise apres sinistre documente (RTO/RPO cibles a definir
+    par niveau d'abonnement).
+
+
+================================================================================
+9. ARCHITECTURE RESEAU ET DEPLOIEMENT
+================================================================================
+
+9.1 Conteneurisation
+------------------------
+
+  - Chaque composant (backend, frontend, worker asynchrone futur) est
+    packages en image Docker multi-stage (build separe de l'execution,
+    image finale minimale et non-root).
+
+9.2 Orchestration
+--------------------
+
+  - Docker Compose pour le developpement local (Phase 0, deja livre).
+  - Kubernetes pour la production : deploiement du backend en plusieurs
+    replicas (stateless, donc horizontalement scalable sans etat partage
+    autre que PostgreSQL/Redis), autoscaling horizontal (HPA) base sur la
+    charge CPU/memoire ou le nombre de requetes.
+  - Ingress Nginx pour la terminaison TLS et le routage vers les services
+    internes (backend, frontend, WebSocket).
+
+9.3 CI/CD (GitHub Actions)
+--------------------------------
+
+  Pipeline type, execute a chaque pull request puis a chaque fusion sur
+  la branche principale :
+
+    1. Lint (backend : Checkstyle/Spotless ; frontend : ESLint)
+    2. Tests unitaires (backend : JUnit ; frontend : Vitest)
+    3. Tests d'integration (backend : Testcontainers avec PostgreSQL reel)
+    4. Build des images Docker
+    5. Scan de vulnerabilites des images (Trivy)
+    6. Publication des images sur un registre (GitHub Container Registry)
+    7. Deploiement automatique en environnement de recette
+    8. Deploiement en production apres validation manuelle (gate humain)
+
+9.4 Environnements
+----------------------
+
+  - local (docker compose), recette/staging (Kubernetes, donnees de test),
+    production (Kubernetes, donnees reelles, sauvegardes actives).
+  - Configuration par variables d'environnement (jamais de secret en dur
+    dans le code — voir .env.example fourni en Phase 0).
+
+
+================================================================================
+10. ARCHITECTURE API
+================================================================================
+
+10.1 Conventions REST
+--------------------------
+
+  - Prefixe de version explicite des le depart : /api/v1/...
+    (permet une v2 future sans casser les integrations existantes).
+  - Noms de ressources en francais, coherents avec le domaine metier
+    (ex: /api/v1/eleves, /api/v1/notes, /api/v1/paiements).
+  - Codes HTTP standards stricts (200/201/204 succes, 400 validation,
+    401 non authentifie, 403 non autorise, 404 introuvable, 409 conflit
+    metier, 422 regle metier violee, 500 erreur interne generique).
+  - Toute erreur suit le contrat unique ApiError (voir Phase 0 livree) :
+    horodatage, statut, code stable, message, chemin, erreurs de champ.
+
+10.2 Documentation
+-----------------------
+
+  - OpenAPI/Swagger genere automatiquement depuis le code (springdoc),
+    toujours a jour avec l'implementation reelle, expose sur
+    /swagger-ui.html.
+
+10.3 Integrations externes (Module 30)
+--------------------------------------------
+
+  - Paiement mobile : Orange Money, MTN MoMo (webhooks de confirmation
+    de paiement, signature verifiee, idempotence stricte pour eviter
+    les doubles encaissements).
+  - Bancaire : normes locales (virements, rapprochement bancaire).
+  - Education : Moodle (import/export de cours), Microsoft 365 / Google
+    Workspace (authentification federee, synchronisation d'agenda).
+  - Toute integration externe passe par une couche d'adaptateur dediee
+    (interface commune ProviderPaiement, implementations
+    OrangeMoneyAdapter/MtnMomoAdapter), pour ne jamais coupler la logique
+    metier a un fournisseur particulier.
+
+
+================================================================================
+11. ARCHITECTURE TEMPS REEL
+================================================================================
+
+  - WebSocket (STOMP over SockJS) pour : chat (Module 22), notifications
+    en direct (Module 24), presence en direct des eleves (Module 12 —
+    "Votre enfant est arrive a 07h18").
+  - Canal par etablissement (topic /topic/etablissement/{id}/...) pour
+    ne jamais diffuser un evenement d'un etablissement vers un autre.
+  - Repli automatique sur polling REST si le WebSocket est indisponible
+    (reseau tres degrade), conformement au principe de degradation
+    gracieuse (P4).
+
+
+================================================================================
+12. ARCHITECTURE INTELLIGENCE ARTIFICIELLE (Module 25)
+================================================================================
+
+  - Service IA isole dans modules/ia, consomme par les autres modules via
+    une interface (jamais l'inverse), pour pouvoir remplacer ou faire
+    evoluer le moteur IA sans impacter le reste du systeme.
+  - Cas d'usage et approche technique associee :
+      - Detection d'eleves en risque d'echec : modele de classification
+        supervise entraine sur l'historique de notes/presences/discipline
+        (anonymise pour l'entrainement).
+      - Generation de commentaires de bulletin / assistant conversationnel :
+        appel a un modele de langage (API externe ou hebergee), avec un
+        garde-fou de validation humaine avant publication (le conseil de
+        classe reste decisionnaire, l'IA assiste).
+      - Recommandation de filieres / ressources : systeme de recommandation
+        base sur les resultats et centres d'interet declares.
+  - Toute prediction IA est stockee avec un score de confiance et reste
+    une SUGGESTION : aucune decision automatique irreversible (orientation,
+    sanction) n'est prise sans validation humaine explicite.
+
+
+================================================================================
+13. ARCHITECTURE DE RESILIENCE ET DE SCALABILITE
+================================================================================
+
+  - Backend stateless : toute montee en charge se fait par ajout de
+    replicas, sans session serveur a synchroniser.
+  - Cache Redis pour eviter de recalculer les operations couteuses
+    (classements de classe, statistiques de dashboard) a chaque requete.
+  - Pagination systematique de toute liste potentiellement volumineuse
+    (jamais de "SELECT * sans LIMIT" expose via l'API).
+  - Circuit breaker (Resilience4j) autour de tout appel a un fournisseur
+    externe (paiement mobile, SMS) pour eviter qu'une panne tierce ne
+    bloque toute la plateforme.
+  - CDN pour les actifs statiques du frontend (Phase 9), utile pour la
+    latence entre pays africains desservis par la meme plateforme.
+
+
+================================================================================
+14. OBSERVABILITE ET MONITORING
+================================================================================
+
+  - Prometheus pour la collecte de metriques (temps de reponse par
+    endpoint, taux d'erreur, utilisation JVM, connexions actives).
+  - Grafana pour les tableaux de bord operationnels (un tableau de bord
+    dedie a la sante plateforme, distinct des dashboards metier des
+    utilisateurs finaux).
+  - Alerting sur seuils critiques (taux d'erreur 5xx, latence anormale,
+    espace disque PostgreSQL/MinIO).
+  - Logs structures (JSON) centralises, correles par un identifiant de
+    requete unique (traceId) propage du frontend au backend.
+
+
+================================================================================
+15. STRATEGIE DE TESTS (conforme au cycle en V)
+================================================================================
+
+  - Tests unitaires : chaque Service (regles metier) et chaque Mapper,
+    isoles de la base de donnees (mocks).
+  - Tests d'integration : Testcontainers avec une vraie instance
+    PostgreSQL/Redis ephemere, pour valider les requetes et migrations
+    Flyway reelles.
+  - Tests de contrat API : verification que chaque endpoint respecte son
+    contrat OpenAPI (evite les ruptures silencieuses cote frontend/mobile).
+  - Tests de charge : k6 ou Gatling sur les endpoints critiques (connexion,
+    saisie de notes en periode de bulletins, paiement) avant chaque
+    livraison majeure.
+  - Tests de securite : scan de dependances (OWASP Dependency-Check),
+    scan d'images Docker (Trivy), tests d'intrusion ponctuels avant mise
+    en production.
+  - Recette utilisateur : jeu de donnees de demonstration realiste par
+    module, valide avec le porteur de projet avant cloture de chaque phase.
+
+
+================================================================================
+16. MATRICE DE DEPENDANCES DES MODULES (ordre de developpement impose)
+================================================================================
+
+    Module                          Depend de
+    --------------------------------------------------------------
+    Auth / Utilisateurs             (aucun — module racine)
+    Etablissements (multi-tenant)   Auth
+    Annees scolaires / Periodes     Etablissements
+    Eleves                         Etablissements, Annees scolaires
+    Parents                        Eleves
+    Enseignants                    Etablissements
+    Classes                        Etablissements, Annees scolaires
+    Matieres                       Classes
+    Emploi du temps                 Classes, Matieres, Enseignants
+    Presence                        Eleves, Emploi du temps
+    Notes                          Eleves, Matieres, Emploi du temps
+    Bulletins                       Notes, Presence, Discipline
+    Discipline                      Eleves
+    Paiements                       Eleves, Etablissements
+    Comptabilite                    Paiements
+    Bibliotheque                    Eleves
+    Infirmerie                      Eleves
+    Transport                       Eleves
+    Cantine                         Eleves
+    Personnel                       Etablissements
+    Documents                       Eleves, Enseignants, Bulletins
+    Chat                           Auth (tous roles)
+    Reunions                        Auth
+    Notifications                   Transversal (ecoute tous les modules)
+    IA                             Notes, Presence, Discipline (donnees historiques)
+    Dashboard                       Transversal (agrege tous les modules)
+    Rapports                        Transversal
+
+  Cette matrice justifie l'ordre des phases deja propose : aucun module
+  n'est developpe avant que ses dependances directes soient livrees et
+  testees.
+
+
+================================================================================
+17. SCHEMAS DE FLUX (DIAGRAMMES TEXTE)
+================================================================================
+
+17.1 Flux de connexion (sequence simplifiee)
+-------------------------------------------------
+
+  Client (Web/Mobile)        Backend                      Base de donnees
+        |                       |                                |
+        |-- POST /auth/connexion (email, mdp) ------------------->|
+        |                       |-- verifie utilisateur ---------->|
+        |                       |<-- utilisateur + role -----------|
+        |                       |-- verifie mot de passe (BCrypt) |
+        |                       |-- si 2FA actif : verifie TOTP    |
+        |                       |-- genere JWT (access+refresh)    |
+        |<-- 200 OK {accessToken, refreshToken, profil} ----------|
+        |                       |                                |
+        |-- requetes suivantes: Authorization: Bearer <token> --->|
+        |                       |-- filtre JWT peuple TenantContext|
+        |                       |-- filtre Hibernate isole les     |
+        |                       |   donnees a l'etablissement      |
+
+17.2 Flux de paiement mobile (Orange Money / MTN MoMo)
+-----------------------------------------------------------
+
+  Parent (mobile)     Backend EDUCORE        Fournisseur (Orange/MTN)
+       |                    |                          |
+       |-- initier paiement->|                          |
+       |                    |-- demande de paiement --->|
+       |                    |<-- reference transaction --|
+       |<-- statut "en attente" --|                      |
+       |                    |                          |
+       |     [parent confirme sur son telephone via USSD/app operateur]
+       |                    |                          |
+       |                    |<-- webhook confirmation --|
+       |                    |-- verifie signature       |
+       |                    |-- verifie idempotence     |
+       |                    |-- enregistre paiement      |
+       |                    |-- genere recu PDF          |
+       |                    |-- notifie parent (push)    |
+       |<-- notification "Paiement recu" ----------------|
+
+17.3 Flux de saisie et publication d'une note (workflow de validation)
+----------------------------------------------------------------------------
+
+  Professeur          Backend               Chef de departement    Parent/Eleve
+      |                   |                        |                    |
+      |-- saisit note --->|                         |                    |
+      |                   |-- statut = SOUMISE ---->|                    |
+      |                   |                         |-- consulte / valide|
+      |                   |<-- statut = VALIDEE -----|                    |
+      |                   |-- recalcule moyenne,     |                    |
+      |                   |   rang, appreciation     |                    |
+      |                   |-- statut = PUBLIEE ------------------------->|
+      |                   |-- notifie parent (Module 24) --------------->|
+
+
+================================================================================
+18. GLOSSAIRE TECHNIQUE
+================================================================================
+
+  Multi-tenant     : une seule instance applicative sert plusieurs clients
+                     (etablissements), avec isolation logique des donnees.
+  RBAC             : Role-Based Access Control, controle d'acces base sur
+                     des roles et permissions.
+  JWT              : JSON Web Token, jeton signe portant l'identite et le
+                     contexte de l'utilisateur.
+  TOTP             : Time-based One-Time Password, code a usage unique
+                     utilise pour le 2FA.
+  DTO              : Data Transfer Object, objet d'echange entre couches
+                     ou entre systemes, distinct de l'entite de persistance.
+  Modulith         : monolithe organise en modules fortement decouples,
+                     extractibles en microservices si necessaire.
+  Circuit breaker  : mecanisme qui isole un appel externe defaillant pour
+                     eviter la propagation de la panne.
+  Idempotence      : propriete d'une operation qui produit le meme resultat
+                     si elle est executee plusieurs fois (crucial pour les
+                     webhooks de paiement).
+
+
+================================================================================
+19. ANNEXES : JUSTIFICATION DES CHOIX TECHNOLOGIQUES
+================================================================================
+
+  Java / Spring Boot   : ecosysteme mature, fortement type, excellent pour
+                         une equipe qui doit maintenir un systeme complexe
+                         sur plusieurs annees ; abondance de developpeurs
+                         formes sur ce stack en Afrique francophone.
+  PostgreSQL           : open source, licence permissive, tres robuste,
+                         evite tout cout de licence a l'echelle (contrairement
+                         a certains SGBD commerciaux) — critere important
+                         pour un produit vise a des etablissements a budget
+                         limite.
+  React + TypeScript   : typage partage avec le backend (DTO miroir),
+                         vaste ecosysteme, bonne performance sur reseau
+                         limite avec un bundle optimise.
+  Flutter              : un seul code source pour Android et iOS, reduisant
+                         le cout de developpement/maintenance mobile.
+  Docker / Kubernetes  : portabilite entre hebergeurs (important pour un
+                         produit qui pourrait etre heberge differemment
+                         selon le pays ou les exigences reglementaires
+                         locales de souverainete des donnees).
+  MinIO                : alternative auto-hebergeable a AWS S3, permettant
+                         de garder les donnees sur un serveur local si
+                         un etablissement ou un pays l'exige, tout en
+                         gardant une API S3 standard (portabilite vers le
+                         cloud si besoin).
+
+================================================================================
+FIN DU DOCUMENT
+================================================================================
